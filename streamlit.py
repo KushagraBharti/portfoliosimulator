@@ -22,8 +22,68 @@ st.markdown(
 
 st.title('VC Portfolio Simulator')
 
-# Sidebar inputs
 stages = ['Pre-Seed', 'Seed', 'Series A', 'Series B']
+existing_portfolio_tab = st.tabs(["Existing Portfolio"])[0]
+default_existing_portfolio = pd.DataFrame([
+    {
+        "Company": "Sample GridCo",
+        "Entry Stage": "Seed",
+        "Invested Capital ($MM)": 1.0,
+        "Current Stage": "Seed",
+        "Current Ownership (%)": 8.0,
+        "Follow-on Reserve ($MM)": 0.5,
+        "Future Dilution (%)": 20.0,
+        "Failure Probability (%)": 30.0,
+        "Exit Valuation Low ($MM)": 25.0,
+        "Exit Valuation High ($MM)": 150.0,
+        "Expected Exit Year": 6,
+    },
+    {
+        "Company": "Sample MineOps",
+        "Entry Stage": "Pre-Seed",
+        "Invested Capital ($MM)": 0.75,
+        "Current Stage": "Pre-Seed",
+        "Current Ownership (%)": 10.0,
+        "Follow-on Reserve ($MM)": 0.75,
+        "Future Dilution (%)": 25.0,
+        "Failure Probability (%)": 35.0,
+        "Exit Valuation Low ($MM)": 20.0,
+        "Exit Valuation High ($MM)": 250.0,
+        "Expected Exit Year": 7,
+    },
+    {
+        "Company": "Sample SpectrumCo",
+        "Entry Stage": "Seed",
+        "Invested Capital ($MM)": 1.25,
+        "Current Stage": "Seed",
+        "Current Ownership (%)": 7.5,
+        "Follow-on Reserve ($MM)": 1.0,
+        "Future Dilution (%)": 20.0,
+        "Failure Probability (%)": 25.0,
+        "Exit Valuation Low ($MM)": 40.0,
+        "Exit Valuation High ($MM)": 300.0,
+        "Expected Exit Year": 6,
+    },
+])
+
+with existing_portfolio_tab:
+    st.subheader("Existing Portfolio Inputs")
+    include_existing_portfolio = st.checkbox("Include existing portfolio in simulations", value=False)
+    st.caption(
+        "Enter current holdings with ownership and reserve assumptions. "
+        "For this first pass, reserves count as additional paid-in capital and future dilution is applied once before exit."
+    )
+    existing_portfolio_input = st.data_editor(
+        default_existing_portfolio,
+        num_rows="dynamic",
+        column_config={
+            "Entry Stage": st.column_config.SelectboxColumn("Entry Stage", options=stages),
+            "Current Stage": st.column_config.SelectboxColumn("Current Stage", options=stages + ["Series C", "IPO"]),
+            "Expected Exit Year": st.column_config.NumberColumn("Expected Exit Year", min_value=0, max_value=20, step=1),
+        },
+    )
+
+# Sidebar inputs
 st.sidebar.header('Fund Parameters')
 fund_size = st.sidebar.number_input("Fund Size ($MM)", min_value=1, max_value=500, value=100, step=1)
 initial_stage = st.sidebar.selectbox('Initial Investment Stage', stages)
@@ -168,6 +228,93 @@ total_mgmt_fee   = fund_size * (management_fee_pct / 100) * management_fee_years
 deployable_capital = fund_size - total_mgmt_fee
 
 
+def normalize_existing_portfolio(existing_df):
+    if existing_df is None or existing_df.empty:
+        return pd.DataFrame()
+
+    df = existing_df.copy()
+    numeric_columns = [
+        "Invested Capital ($MM)",
+        "Current Ownership (%)",
+        "Follow-on Reserve ($MM)",
+        "Future Dilution (%)",
+        "Failure Probability (%)",
+        "Exit Valuation Low ($MM)",
+        "Exit Valuation High ($MM)",
+        "Expected Exit Year",
+    ]
+
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
+
+    df["Company"] = df["Company"].fillna("").astype(str).str.strip()
+    df["Entry Stage"] = df["Entry Stage"].where(df["Entry Stage"].isin(stages), initial_stage)
+    df["Current Stage"] = df["Current Stage"].where(df["Current Stage"].isin(stages + ["Series C", "IPO"]), initial_stage)
+
+    df = df[(df["Company"] != "") & (df["Invested Capital ($MM)"] > 0) & (df["Current Ownership (%)"] > 0)]
+    if df.empty:
+        return pd.DataFrame()
+
+    df["Current Ownership (%)"] = df["Current Ownership (%)"].clip(0, 100)
+    df["Follow-on Reserve ($MM)"] = df["Follow-on Reserve ($MM)"].clip(lower=0)
+    df["Future Dilution (%)"] = df["Future Dilution (%)"].clip(0, 100)
+    df["Failure Probability (%)"] = df["Failure Probability (%)"].clip(0, 100)
+    df["Exit Valuation Low ($MM)"] = df["Exit Valuation Low ($MM)"].clip(lower=0)
+    df["Exit Valuation High ($MM)"] = np.maximum(df["Exit Valuation High ($MM)"], df["Exit Valuation Low ($MM)"])
+    df["Expected Exit Year"] = df["Expected Exit Year"].clip(lower=0).round().astype(int)
+
+    return df
+
+
+existing_portfolio_assumptions = (
+    normalize_existing_portfolio(existing_portfolio_input)
+    if include_existing_portfolio
+    else pd.DataFrame()
+)
+
+
+def simulate_existing_portfolio(existing_df):
+    if existing_df is None or existing_df.empty:
+        return pd.DataFrame()
+
+    investments = []
+    for _, holding in existing_df.iterrows():
+        invested_capital = holding["Invested Capital ($MM)"]
+        reserve_amount = holding["Follow-on Reserve ($MM)"]
+        entry_amount = invested_capital + reserve_amount
+        ownership = (holding["Current Ownership (%)"] / 100) * (1 - holding["Future Dilution (%)"] / 100)
+
+        if np.random.rand() * 100 <= holding["Failure Probability (%)"]:
+            exit_valuation = 0
+            exit_amount = 0
+            exit_stage = holding["Current Stage"]
+        else:
+            exit_valuation = np.random.uniform(
+                holding["Exit Valuation Low ($MM)"],
+                holding["Exit Valuation High ($MM)"],
+            )
+            exit_amount = ownership * exit_valuation
+            exit_stage = "Exit"
+
+        investments.append({
+            "Source": "Existing Portfolio",
+            "Company": holding["Company"],
+            "Entry Stage": holding["Entry Stage"],
+            "Current Stage": holding["Current Stage"],
+            "Entry Amount": entry_amount,
+            "Initial Invested ($MM)": invested_capital,
+            "Follow-on Reserve ($MM)": reserve_amount,
+            "Ownership (%)": ownership * 100,
+            "Exit Stage": exit_stage,
+            "Exit Valuation ($MM)": exit_valuation,
+            "Exit Amount": exit_amount,
+            "Deployment Year": 0,
+            "Exit Year": holding["Expected Exit Year"],
+        })
+
+    return pd.DataFrame(investments)
+
+
 # Simulation function
 def simulate_portfolio():
     investments = []
@@ -183,7 +330,12 @@ def simulate_portfolio():
             deployed_in_stage += check_size
             equity = check_size / valuation
 
-            investment = {'Entry Stage': stage, 'Entry Amount': check_size}
+            investment = {
+                'Source': 'New Deployment',
+                'Company': f'{stage} Investment {len(investments) + 1}',
+                'Entry Stage': stage,
+                'Entry Amount': check_size
+            }
             current_stage = stage
 
             stages_sequence = stages[stages.index(stage):] + ['Series C', 'IPO']
@@ -202,10 +354,16 @@ def simulate_portfolio():
             else:
                 exit_valuation = np.random.uniform(*exit_valuations[current_stage])
                 exit_amount = equity * exit_valuation
-            investment.update({'Exit Stage': current_stage, 'Exit Amount': exit_amount})
+            investment.update({'Current Stage': current_stage, 'Exit Stage': current_stage, 'Exit Amount': exit_amount})
             investments.append(investment)
 
-    return pd.DataFrame(investments)
+    simulated_investments = pd.DataFrame(investments)
+    existing_investments = simulate_existing_portfolio(existing_portfolio_assumptions)
+
+    if not existing_investments.empty:
+        return pd.concat([simulated_investments, existing_investments], ignore_index=True, sort=False)
+
+    return simulated_investments
 
 # Run simulations
 all_sim_results = [simulate_portfolio() for _ in range(num_simulations)]
@@ -218,32 +376,50 @@ adjusted_irrs = []
 realized_years_list = []
 for sim_df in all_sim_results:
     cash_flows_by_year = {}
-    sim_df['Deployment Year'] = np.random.randint(0, deployment_years, size=len(sim_df))
+    if 'Source' not in sim_df.columns:
+        sim_df['Source'] = 'New Deployment'
+    if 'Deployment Year' not in sim_df.columns:
+        sim_df['Deployment Year'] = np.nan
+
+    new_deployment_rows = sim_df['Source'].fillna('New Deployment') == 'New Deployment'
+    if new_deployment_rows.any():
+        sim_df.loc[new_deployment_rows, 'Deployment Year'] = np.random.randint(
+            0,
+            deployment_years,
+            size=new_deployment_rows.sum()
+        )
+    sim_df.loc[~new_deployment_rows, 'Deployment Year'] = sim_df.loc[
+        ~new_deployment_rows,
+        'Deployment Year'
+    ].fillna(0)
 
     # Track entries and exits by year with stage-based holding period
     for _, inv in sim_df.iterrows():
-        year = inv['Deployment Year']
+        year = int(inv['Deployment Year'])
         cash_flows_by_year[year] = cash_flows_by_year.get(year, 0) - inv['Entry Amount']
 
-        # Use years from stage sliders (range or fixed) and sum per stage
-        entry_stage = inv['Entry Stage']
-        exit_stage = inv['Exit Stage']
-        stage_order = stages + ['Series C', 'IPO']
-        entry_index = stage_order.index(entry_stage)
-        exit_index = stage_order.index(exit_stage)
+        if pd.notna(inv.get('Exit Year', np.nan)):
+            exit_year = int(inv['Exit Year'])
+        else:
+            # Use years from stage sliders (range or fixed) and sum per stage
+            entry_stage = inv['Entry Stage']
+            exit_stage = inv['Exit Stage']
+            stage_order = stages + ['Series C', 'IPO']
+            entry_index = stage_order.index(entry_stage)
+            exit_index = stage_order.index(exit_stage)
 
-        hold_years = 0
-        for i in range(entry_index, exit_index):
-            key = stage_order[i] + ' to ' + stage_order[i + 1]
-            years_slider = years_to_next.get(key, 0)
-            # If the slider is a range, sample from it
-            if isinstance(years_slider, tuple):
-                stage_years = np.random.uniform(*years_slider)
-            else:
-                stage_years = years_slider
-            hold_years += stage_years
+            hold_years = 0
+            for i in range(entry_index, exit_index):
+                key = stage_order[i] + ' to ' + stage_order[i + 1]
+                years_slider = years_to_next.get(key, 0)
+                # If the slider is a range, sample from it
+                if isinstance(years_slider, tuple):
+                    stage_years = np.random.uniform(*years_slider)
+                else:
+                    stage_years = years_slider
+                hold_years += stage_years
 
-        exit_year = year + int(np.ceil(hold_years))
+            exit_year = year + int(np.ceil(hold_years))
         cash_flows_by_year[exit_year] = cash_flows_by_year.get(exit_year, 0) + inv['Exit Amount']
 
     # Add annual management fees during deployment
@@ -315,6 +491,38 @@ for col, metric, val in zip(
     else:
         col.metric(f"{metric}", f"{val:.2f}")
 
+if include_existing_portfolio and not existing_portfolio_assumptions.empty:
+    st.subheader("Existing vs. New Portfolio Contribution")
+    contribution_rows = []
+    for source in ["Existing Portfolio", "New Deployment"]:
+        source_paid_in = [
+            res.loc[res["Source"] == source, "Entry Amount"].sum()
+            if "Source" in res.columns else 0
+            for res in all_sim_results
+        ]
+        source_distributed = [
+            res.loc[res["Source"] == source, "Exit Amount"].sum()
+            if "Source" in res.columns else 0
+            for res in all_sim_results
+        ]
+        mean_paid_in = np.mean(source_paid_in)
+        mean_distributed = np.mean(source_distributed)
+        contribution_rows.append({
+            "Source": source,
+            "Mean Paid-in ($MM)": mean_paid_in,
+            "Mean Distributed ($MM)": mean_distributed,
+            "Mean MOIC": mean_distributed / mean_paid_in if mean_paid_in else 0,
+        })
+
+    contribution_df = pd.DataFrame(contribution_rows)
+    st.dataframe(
+        contribution_df.style.format({
+            "Mean Paid-in ($MM)": "{:,.2f}",
+            "Mean Distributed ($MM)": "{:,.2f}",
+            "Mean MOIC": "{:,.2f}",
+        })
+    )
+
 # MOIC Distribution
 st.subheader("Distribution of Fund MOIC")
 fig, ax = plt.subplots(figsize=(8, 4), dpi=120)
@@ -352,3 +560,9 @@ st.pyplot(fig)
 # Investment Schedule
 st.subheader("Sample Simulation Investments")
 st.dataframe(all_sim_results[0])
+st.download_button(
+    "Download sample simulation CSV",
+    data=all_sim_results[0].to_csv(index=False).encode("utf-8"),
+    file_name="sample_simulation.csv",
+    mime="text/csv",
+)
