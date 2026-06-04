@@ -5,6 +5,7 @@
 
 
 import streamlit as st
+import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -594,3 +595,451 @@ st.download_button(
     file_name="sample_simulation.csv",
     mime="text/csv",
 )
+
+
+# Bonus Portfolio Modeling Lab
+st.header("Portfolio Modeling Lab")
+st.caption(
+    "Experimental branch: a more opinionated fund-construction lab layered on top of the original simulator. "
+    "It keeps the model transparent rather than pretending public data can predict private outcomes precisely."
+)
+
+bonus_presets = {
+    "Balanced seed fund": {
+        "avg_check": 2.0,
+        "reserve_ratio": 0.75,
+        "recycling_pct": 10,
+        "follow_on_year": 3,
+        "outcome_preset": "Industrial power law",
+        "reserve_strategy": "Pro-rata every winner",
+    },
+    "Concentrated hard-tech": {
+        "avg_check": 2.8,
+        "reserve_ratio": 1.25,
+        "recycling_pct": 5,
+        "follow_on_year": 4,
+        "outcome_preset": "Deep-tech heavy tail",
+        "reserve_strategy": "Concentrate reserves in winners",
+    },
+    "Capital efficient pre-seed": {
+        "avg_check": 1.1,
+        "reserve_ratio": 0.4,
+        "recycling_pct": 15,
+        "follow_on_year": 2,
+        "outcome_preset": "Capital efficient",
+        "reserve_strategy": "Fixed reserve ratio",
+    },
+}
+
+outcome_presets = {
+    "Industrial power law": pd.DataFrame(
+        [
+            {"Bucket": "Writeoff", "Probability": 0.55, "Multiple": 0.0, "Hold Years": 4},
+            {"Bucket": "Small return", "Probability": 0.25, "Multiple": 1.5, "Hold Years": 5},
+            {"Bucket": "Good return", "Probability": 0.15, "Multiple": 6.0, "Hold Years": 7},
+            {"Bucket": "Fund returner", "Probability": 0.05, "Multiple": 45.0, "Hold Years": 9},
+        ]
+    ),
+    "Deep-tech heavy tail": pd.DataFrame(
+        [
+            {"Bucket": "Writeoff", "Probability": 0.62, "Multiple": 0.0, "Hold Years": 5},
+            {"Bucket": "Small return", "Probability": 0.20, "Multiple": 1.3, "Hold Years": 6},
+            {"Bucket": "Good return", "Probability": 0.13, "Multiple": 8.0, "Hold Years": 8},
+            {"Bucket": "Fund returner", "Probability": 0.05, "Multiple": 75.0, "Hold Years": 10},
+        ]
+    ),
+    "Capital efficient": pd.DataFrame(
+        [
+            {"Bucket": "Writeoff", "Probability": 0.50, "Multiple": 0.0, "Hold Years": 3},
+            {"Bucket": "Small return", "Probability": 0.30, "Multiple": 1.7, "Hold Years": 5},
+            {"Bucket": "Good return", "Probability": 0.15, "Multiple": 5.0, "Hold Years": 6},
+            {"Bucket": "Fund returner", "Probability": 0.05, "Multiple": 30.0, "Hold Years": 8},
+        ]
+    ),
+}
+
+scenario_adjustments = {
+    "Conservative": {"winner_probability": 0.75, "winner_multiple": 0.65, "writeoff_probability": 1.15},
+    "Base": {"winner_probability": 1.0, "winner_multiple": 1.0, "writeoff_probability": 1.0},
+    "High": {"winner_probability": 1.2, "winner_multiple": 1.35, "writeoff_probability": 0.9},
+}
+
+
+def adjusted_outcome_table(outcome_table, scenario_name):
+    table = outcome_table.copy()
+    adjustment = scenario_adjustments[scenario_name]
+    winner_rows = table["Bucket"].isin(["Good return", "Fund returner"])
+    writeoff_rows = table["Bucket"] == "Writeoff"
+
+    table.loc[winner_rows, "Probability"] *= adjustment["winner_probability"]
+    table.loc[writeoff_rows, "Probability"] *= adjustment["writeoff_probability"]
+    table["Probability"] = table["Probability"] / table["Probability"].sum()
+    table.loc[winner_rows, "Multiple"] *= adjustment["winner_multiple"]
+
+    return table
+
+
+def simulate_bonus_strategy(
+    scenario_name,
+    outcome_table,
+    avg_check,
+    reserve_ratio,
+    reserve_strategy,
+    recycling_pct,
+    follow_on_year,
+    simulation_count,
+):
+    table = adjusted_outcome_table(outcome_table, scenario_name)
+    investable_capital = max(deployable_capital, 0)
+
+    if reserve_strategy == "No reserves":
+        initial_pool = investable_capital
+        reserve_pool = 0
+    else:
+        initial_pool = investable_capital / (1 + reserve_ratio)
+        reserve_pool = investable_capital - initial_pool
+
+    company_count = max(1, int(initial_pool / max(avg_check, 0.1)))
+    initial_paid = company_count * avg_check
+    probabilities = table["Probability"].to_numpy()
+    multiples = table["Multiple"].to_numpy()
+    hold_years = table["Hold Years"].to_numpy()
+    bucket_names = table["Bucket"].to_numpy()
+
+    results = []
+    yearly_cashflows = []
+
+    for _ in range(simulation_count):
+        bucket_indexes = np.random.choice(len(table), size=company_count, p=probabilities)
+        selected_multiples = multiples[bucket_indexes]
+        selected_buckets = bucket_names[bucket_indexes]
+        selected_hold_years = hold_years[bucket_indexes]
+
+        reserve_deployed = 0
+        reserve_distribution = 0
+
+        if reserve_pool > 0:
+            if reserve_strategy == "Fixed reserve ratio":
+                eligible_mask = selected_multiples > 0
+            elif reserve_strategy == "Pro-rata every winner":
+                eligible_mask = selected_multiples >= 1.5
+            else:
+                eligible_mask = selected_buckets == "Fund returner"
+
+            eligible_count = int(eligible_mask.sum())
+            if eligible_count > 0:
+                reserve_per_company = min(reserve_pool / eligible_count, avg_check * max(reserve_ratio, 0.1))
+                reserve_deployed = reserve_per_company * eligible_count
+                reserve_distribution = (
+                    reserve_per_company
+                    * np.maximum(selected_multiples[eligible_mask] * 0.55, 0)
+                ).sum()
+
+        initial_distribution = (avg_check * selected_multiples).sum()
+        early_distribution = (
+            avg_check
+            * selected_multiples[selected_hold_years <= max(follow_on_year + 2, 3)]
+        ).sum()
+        recycled_capital = min(
+            early_distribution * (recycling_pct / 100),
+            fund_size * 0.15,
+        )
+        recycled_distribution = recycled_capital * max(np.mean(selected_multiples[selected_multiples > 0]) if (selected_multiples > 0).any() else 0, 0)
+
+        paid_in_total = initial_paid + reserve_deployed + recycled_capital
+        gross_distribution = initial_distribution + reserve_distribution + recycled_distribution
+        net_distribution = gross_distribution - total_mgmt_fee
+        gross_moic = gross_distribution / paid_in_total if paid_in_total else 0
+        net_dpi = max(net_distribution / paid_in_total, 0) if paid_in_total else 0
+
+        cashflows = {0: 0}
+        annual_initial = initial_paid / max(deployment_years, 1)
+        for year in range(deployment_years):
+            cashflows[year] = cashflows.get(year, 0) - annual_initial
+        for fee_year in range(management_fee_years):
+            cashflows[fee_year] = cashflows.get(fee_year, 0) - fund_size * (management_fee_pct / 100)
+        if reserve_deployed:
+            cashflows[follow_on_year] = cashflows.get(follow_on_year, 0) - reserve_deployed
+        if recycled_capital:
+            cashflows[follow_on_year] = cashflows.get(follow_on_year, 0) - recycled_capital
+
+        for multiple, hold_year in zip(selected_multiples, selected_hold_years):
+            cashflows[int(hold_year)] = cashflows.get(int(hold_year), 0) + avg_check * multiple
+        if reserve_distribution:
+            cashflows[min(follow_on_year + 4, 12)] = cashflows.get(min(follow_on_year + 4, 12), 0) + reserve_distribution
+        if recycled_distribution:
+            cashflows[min(follow_on_year + 5, 12)] = cashflows.get(min(follow_on_year + 5, 12), 0) + recycled_distribution
+
+        years = list(range(0, max(cashflows.keys()) + 1))
+        cashflow_list = [cashflows.get(year, 0) for year in years]
+        try:
+            irr_value = npf.irr(cashflow_list)
+            irr_percent = 0 if irr_value is None or np.isnan(irr_value) else irr_value * 100
+        except Exception:
+            irr_percent = 0
+
+        for year in years:
+            yearly_cashflows.append(
+                {
+                    "Scenario": scenario_name,
+                    "Year": year,
+                    "Net Cash Flow ($MM)": cashflows.get(year, 0),
+                }
+            )
+
+        results.append(
+            {
+                "Scenario": scenario_name,
+                "Companies": company_count,
+                "Initial Paid-in ($MM)": initial_paid,
+                "Reserve Deployed ($MM)": reserve_deployed,
+                "Recycled ($MM)": recycled_capital,
+                "Total Paid-in ($MM)": paid_in_total,
+                "Gross Distributed ($MM)": gross_distribution,
+                "Gross MOIC": gross_moic,
+                "Net DPI": net_dpi,
+                "IRR %": irr_percent,
+                "Loss of Capital": net_distribution < paid_in_total,
+                "Fund Returner Count": int((selected_buckets == "Fund returner").sum()),
+            }
+        )
+
+    return pd.DataFrame(results), pd.DataFrame(yearly_cashflows), table
+
+
+def summarize_bonus_results(results_df):
+    return pd.Series(
+        {
+            "Companies": results_df["Companies"].mean(),
+            "Initial Paid-in ($MM)": results_df["Initial Paid-in ($MM)"].mean(),
+            "Reserve Deployed ($MM)": results_df["Reserve Deployed ($MM)"].mean(),
+            "Recycled ($MM)": results_df["Recycled ($MM)"].mean(),
+            "Total Paid-in ($MM)": results_df["Total Paid-in ($MM)"].mean(),
+            "Gross Distributed ($MM)": results_df["Gross Distributed ($MM)"].mean(),
+            "Gross MOIC": results_df["Gross MOIC"].mean(),
+            "Net DPI": results_df["Net DPI"].mean(),
+            "IRR %": results_df["IRR %"].mean(),
+            "P(LP Net < 1.0x)": results_df["Loss of Capital"].mean(),
+            "Mean Fund Returners": results_df["Fund Returner Count"].mean(),
+        }
+    )
+
+
+with st.container():
+    preset_name = st.selectbox("Assumption preset", list(bonus_presets.keys()))
+    preset = bonus_presets[preset_name]
+
+    lab_cols = st.columns(3)
+    with lab_cols[0]:
+        bonus_avg_check = st.number_input(
+            "Average initial check ($MM)",
+            min_value=0.1,
+            max_value=25.0,
+            value=float(preset["avg_check"]),
+            step=0.1,
+        )
+        bonus_reserve_strategy = st.selectbox(
+            "Reserve strategy",
+            ["No reserves", "Fixed reserve ratio", "Pro-rata every winner", "Concentrate reserves in winners"],
+            index=["No reserves", "Fixed reserve ratio", "Pro-rata every winner", "Concentrate reserves in winners"].index(preset["reserve_strategy"]),
+        )
+    with lab_cols[1]:
+        bonus_reserve_ratio = st.slider(
+            "Reserve ratio",
+            min_value=0.0,
+            max_value=3.0,
+            value=float(preset["reserve_ratio"]),
+            step=0.05,
+        )
+        bonus_recycling_pct = st.slider(
+            "Recycling percentage",
+            min_value=0,
+            max_value=50,
+            value=int(preset["recycling_pct"]),
+            step=1,
+        )
+    with lab_cols[2]:
+        bonus_follow_on_year = st.slider(
+            "Follow-on timing year",
+            min_value=1,
+            max_value=8,
+            value=int(preset["follow_on_year"]),
+            step=1,
+        )
+        bonus_simulations = st.slider(
+            "Bonus lab simulations",
+            min_value=50,
+            max_value=1000,
+            value=200,
+            step=100,
+        )
+
+    bonus_outcome_preset = st.selectbox(
+        "Power-law outcome preset",
+        list(outcome_presets.keys()),
+        index=list(outcome_presets.keys()).index(preset["outcome_preset"]),
+    )
+    selected_outcome_table = outcome_presets[bonus_outcome_preset]
+
+    st.subheader("Outcome Buckets")
+    edited_outcome_table = st.data_editor(
+        selected_outcome_table,
+        num_rows="fixed",
+        column_config={
+            "Bucket": st.column_config.TextColumn("Bucket", disabled=True),
+            "Probability": st.column_config.NumberColumn("Probability", min_value=0.0, max_value=1.0, step=0.01),
+            "Multiple": st.column_config.NumberColumn("Multiple", min_value=0.0, step=0.5),
+            "Hold Years": st.column_config.NumberColumn("Hold Years", min_value=1, max_value=15, step=1),
+        },
+    )
+    if edited_outcome_table["Probability"].sum() <= 0:
+        st.error("Outcome probabilities must sum to more than zero.")
+    else:
+        edited_outcome_table["Probability"] = edited_outcome_table["Probability"] / edited_outcome_table["Probability"].sum()
+
+    assumption_summary = {
+        "preset": preset_name,
+        "fund_size_mm": fund_size,
+        "deployable_capital_mm": deployable_capital,
+        "management_fee_pct": management_fee_pct,
+        "management_fee_years": management_fee_years,
+        "deployment_years": deployment_years,
+        "average_initial_check_mm": bonus_avg_check,
+        "reserve_strategy": bonus_reserve_strategy,
+        "reserve_ratio": bonus_reserve_ratio,
+        "recycling_pct": bonus_recycling_pct,
+        "follow_on_year": bonus_follow_on_year,
+        "outcome_preset": bonus_outcome_preset,
+        "outcome_buckets": edited_outcome_table.to_dict(orient="records"),
+    }
+
+    st.subheader("Assumption Summary")
+    st.json(assumption_summary)
+    export_cols = st.columns(2)
+    with export_cols[0]:
+        st.download_button(
+            "Download assumptions JSON",
+            data=json.dumps(assumption_summary, indent=2).encode("utf-8"),
+            file_name="portfolio_lab_assumptions.json",
+            mime="application/json",
+        )
+    with export_cols[1]:
+        st.download_button(
+            "Download assumptions CSV",
+            data=pd.DataFrame([assumption_summary]).drop(columns=["outcome_buckets"]).to_csv(index=False).encode("utf-8"),
+            file_name="portfolio_lab_assumptions.csv",
+            mime="text/csv",
+        )
+
+    scenario_results = []
+    scenario_cashflows = []
+    scenario_tables = {}
+    for scenario_name in ["Conservative", "Base", "High"]:
+        result_df, cashflow_df, table = simulate_bonus_strategy(
+            scenario_name,
+            edited_outcome_table,
+            bonus_avg_check,
+            bonus_reserve_ratio,
+            bonus_reserve_strategy,
+            bonus_recycling_pct,
+            bonus_follow_on_year,
+            bonus_simulations,
+        )
+        scenario_results.append(summarize_bonus_results(result_df).rename(scenario_name))
+        scenario_cashflows.append(cashflow_df)
+        scenario_tables[scenario_name] = table
+
+    scenario_summary_df = pd.DataFrame(scenario_results)
+    st.subheader("Scenario Comparison")
+    st.dataframe(
+        scenario_summary_df.style.format({
+            "Companies": "{:,.1f}",
+            "Initial Paid-in ($MM)": "{:,.2f}",
+            "Reserve Deployed ($MM)": "{:,.2f}",
+            "Recycled ($MM)": "{:,.2f}",
+            "Total Paid-in ($MM)": "{:,.2f}",
+            "Gross Distributed ($MM)": "{:,.2f}",
+            "Gross MOIC": "{:,.2f}",
+            "Net DPI": "{:,.2f}",
+            "IRR %": "{:,.1f}",
+            "P(LP Net < 1.0x)": "{:.0%}",
+            "Mean Fund Returners": "{:,.2f}",
+        })
+    )
+
+    st.download_button(
+        "Download scenario comparison CSV",
+        data=scenario_summary_df.reset_index(names="Scenario").to_csv(index=False).encode("utf-8"),
+        file_name="portfolio_lab_scenarios.csv",
+        mime="text/csv",
+    )
+
+    st.subheader("J-Curve / Cash-Flow Preview")
+    cashflow_summary_df = (
+        pd.concat(scenario_cashflows, ignore_index=True)
+        .groupby(["Scenario", "Year"], as_index=False)["Net Cash Flow ($MM)"]
+        .mean()
+    )
+    pivot_cashflows = cashflow_summary_df.pivot(index="Year", columns="Scenario", values="Net Cash Flow ($MM)").fillna(0)
+    st.line_chart(pivot_cashflows)
+    st.dataframe(pivot_cashflows.style.format("{:,.2f}"))
+
+    st.subheader("Sensitivity Analysis")
+    base_moic = scenario_summary_df.loc["Base", "Net DPI"]
+    sensitivity_cases = []
+    sensitivity_inputs = [
+        ("Average check", "average_check", bonus_avg_check * 0.8, bonus_avg_check * 1.2),
+        ("Reserve ratio", "reserve_ratio", max(bonus_reserve_ratio - 0.25, 0), bonus_reserve_ratio + 0.25),
+        ("Recycling", "recycling_pct", max(bonus_recycling_pct - 10, 0), min(bonus_recycling_pct + 10, 50)),
+        ("Follow-on year", "follow_on_year", max(bonus_follow_on_year - 1, 1), min(bonus_follow_on_year + 1, 8)),
+    ]
+
+    for label, key, low_value, high_value in sensitivity_inputs:
+        case_values = []
+        for value in [low_value, high_value]:
+            avg_check_case = value if key == "average_check" else bonus_avg_check
+            reserve_ratio_case = value if key == "reserve_ratio" else bonus_reserve_ratio
+            recycling_case = value if key == "recycling_pct" else bonus_recycling_pct
+            follow_on_case = int(value) if key == "follow_on_year" else bonus_follow_on_year
+
+            case_df, _, _ = simulate_bonus_strategy(
+                "Base",
+                edited_outcome_table,
+                avg_check_case,
+                reserve_ratio_case,
+                bonus_reserve_strategy,
+                recycling_case,
+                follow_on_case,
+                max(75, int(bonus_simulations / 2)),
+            )
+            case_values.append(summarize_bonus_results(case_df)["Net DPI"])
+
+        sensitivity_cases.append(
+            {
+                "Driver": label,
+                "Low Case Net DPI": case_values[0],
+                "High Case Net DPI": case_values[1],
+                "Spread vs Base": max(abs(case_values[0] - base_moic), abs(case_values[1] - base_moic)),
+            }
+        )
+
+    sensitivity_df = pd.DataFrame(sensitivity_cases).sort_values("Spread vs Base", ascending=False)
+    st.dataframe(
+        sensitivity_df.style.format({
+            "Low Case Net DPI": "{:,.2f}",
+            "High Case Net DPI": "{:,.2f}",
+            "Spread vs Base": "{:,.2f}",
+        })
+    )
+    st.bar_chart(sensitivity_df.set_index("Driver")["Spread vs Base"])
+
+    st.subheader("Model Notes")
+    st.markdown(
+        """
+        - The bonus lab uses transparent outcome buckets rather than hidden private-market data.
+        - Reserve dollars are deployed into eligible companies based on the selected reserve strategy.
+        - Follow-on returns are haircut to reflect later entry prices.
+        - Recycling is modeled as a single redeployment of early distributions and is capped at 15% of fund size.
+        - The loss-of-capital readout is the share of simulations where net distributions after management fees fail to return paid-in capital.
+        """
+    )
