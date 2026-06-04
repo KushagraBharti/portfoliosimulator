@@ -23,10 +23,22 @@ st.markdown(
 st.title('VC Portfolio Simulator')
 
 stages = ['Pre-Seed', 'Seed', 'Series A', 'Series B']
-existing_portfolio_tab = st.tabs(["Existing Portfolio"])[0]
-default_existing_portfolio = pd.DataFrame([
+existing_portfolio_columns = [
+    "Company",
+    "Entry Stage",
+    "Invested Capital ($MM)",
+    "Current Stage",
+    "Current Ownership (%)",
+    "Follow-on Reserve ($MM)",
+    "Future Dilution (%)",
+    "Failure Probability (%)",
+    "Exit Valuation Low ($MM)",
+    "Exit Valuation High ($MM)",
+    "Expected Exit Year",
+]
+example_existing_portfolio = pd.DataFrame([
     {
-        "Company": "Sample GridCo",
+        "Company": "Example GridCo",
         "Entry Stage": "Seed",
         "Invested Capital ($MM)": 1.0,
         "Current Stage": "Seed",
@@ -39,7 +51,7 @@ default_existing_portfolio = pd.DataFrame([
         "Expected Exit Year": 6,
     },
     {
-        "Company": "Sample MineOps",
+        "Company": "Example MineOps",
         "Entry Stage": "Pre-Seed",
         "Invested Capital ($MM)": 0.75,
         "Current Stage": "Pre-Seed",
@@ -52,7 +64,7 @@ default_existing_portfolio = pd.DataFrame([
         "Expected Exit Year": 7,
     },
     {
-        "Company": "Sample SpectrumCo",
+        "Company": "Example SpectrumCo",
         "Entry Stage": "Seed",
         "Invested Capital ($MM)": 1.25,
         "Current Stage": "Seed",
@@ -66,19 +78,29 @@ default_existing_portfolio = pd.DataFrame([
     },
 ])
 
+existing_portfolio_tab = st.tabs(["Existing Portfolio"])[0]
 with existing_portfolio_tab:
     st.subheader("Existing Portfolio Inputs")
     include_existing_portfolio = st.checkbox("Include existing portfolio in simulations", value=False)
+    use_example_existing_portfolio = st.checkbox("Populate example assumptions", value=False)
     st.caption(
         "Enter current holdings with ownership and reserve assumptions. "
-        "For this first pass, reserves count as additional paid-in capital and future dilution is applied once before exit."
+        "Reserves count as additional paid-in capital, and future dilution is applied once before exit. "
+        "Leave the table blank if you only want to simulate new deployment."
     )
     existing_portfolio_input = st.data_editor(
-        default_existing_portfolio,
+        example_existing_portfolio if use_example_existing_portfolio else pd.DataFrame(columns=existing_portfolio_columns),
         num_rows="dynamic",
         column_config={
             "Entry Stage": st.column_config.SelectboxColumn("Entry Stage", options=stages),
             "Current Stage": st.column_config.SelectboxColumn("Current Stage", options=stages + ["Series C", "IPO"]),
+            "Invested Capital ($MM)": st.column_config.NumberColumn("Invested Capital ($MM)", min_value=0.0, step=0.1),
+            "Current Ownership (%)": st.column_config.NumberColumn("Current Ownership (%)", min_value=0.0, max_value=100.0, step=0.1),
+            "Follow-on Reserve ($MM)": st.column_config.NumberColumn("Follow-on Reserve ($MM)", min_value=0.0, step=0.1),
+            "Future Dilution (%)": st.column_config.NumberColumn("Future Dilution (%)", min_value=0.0, max_value=100.0, step=1.0),
+            "Failure Probability (%)": st.column_config.NumberColumn("Failure Probability (%)", min_value=0.0, max_value=100.0, step=1.0),
+            "Exit Valuation Low ($MM)": st.column_config.NumberColumn("Exit Valuation Low ($MM)", min_value=0.0, step=1.0),
+            "Exit Valuation High ($MM)": st.column_config.NumberColumn("Exit Valuation High ($MM)", min_value=0.0, step=1.0),
             "Expected Exit Year": st.column_config.NumberColumn("Expected Exit Year", min_value=0, max_value=20, step=1),
         },
     )
@@ -271,6 +293,12 @@ existing_portfolio_assumptions = (
     if include_existing_portfolio
     else pd.DataFrame()
 )
+
+if include_existing_portfolio and existing_portfolio_assumptions.empty:
+    st.warning(
+        "Existing portfolio simulation is enabled, but no valid holdings were found. "
+        "Add at least a company name, invested capital, and current ownership."
+    )
 
 
 def simulate_existing_portfolio(existing_df):
